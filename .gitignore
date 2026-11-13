@@ -1,0 +1,52 @@
+# --- Credentials (copy the *.example files and fill them in) ---
+config.ini
+tootophp/tootophp.json
+
+# --- Retired copies of the main script that still hold old keys; kept on the server only ---
+testingcommon.inc
+test-tfrmonitor.php
+old-tfrmonitor.php
+tfrmonitor-precurl.php
+tfrmonitor-tfr2.php
+tfrmonitor.php.backup
+
+# --- Runtime output and state ---
+*.log
+*.lock
+*.dat
+tfrs.json
+tfr_alerts.json
+tfr_last_alert.txt
+rocketlaunch.json
+china.json
+json
+json.txt
+skeet.txt
+cronskeet.txt
+maps/
+rendered_maps/
+launch_forecasts/
+
+# --- Debug captures and scratch files ---
+*.old
+debug.txt
+tfrmonitordebug.txt
+test.txt
+xmltfr.txt
+raw-text.html
+detail_1_6464.xml
+*.test
+/2386.png
+/sect_1_2386.png
+/fixed_tfr.png
+/user-bookmarks.png
+
+# --- Backups made while editing ---
+*.bak*
+
+# --- Fonts are commercial/third-party; install them locally (see README) ---
+fonts/
+
+# --- Dependencies (run `php composer.phar install`) ---
+vendor/
+composer.phar

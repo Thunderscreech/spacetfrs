@@ -1,0 +1,6 @@
+*/3 * * * * php /home/chairboy/tfrmonitor/tfrmonitor.php  > /home/chairboy/tfrmonitor/tfrmonitor_check.log 2>&1
+0 */6 * * * php /home/chairboy/tfrmonitor/rocketlaunchlivescraper.php
+*/30 * * * * php /home/chairboy/tfrmonitor/45th_weather.php > /home/chairboy/tfrmonitor/45th_weather.log 2>&1
+#*/5 * * * * php /home/chairboy/tfrmonitor/atcscc_advisory_watcher.php  > /home/chairboy/tfrmonitor/atcscc_advisory_watcher.log 2>&1
+0 1 * * * find /home/chairboy/tfrmonitor/rendered_maps/*.png -mtime +10 -delete
+0 1 * * * find /home/chairboy/tfrmonitor/maps/*.png -mtime +5 -delete
