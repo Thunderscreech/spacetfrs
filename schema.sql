@@ -104,9 +104,8 @@ CREATE TABLE `tfr_list` (
   `twitter_status` varchar(32) DEFAULT NULL,
   `mastodon_status` varchar(32) DEFAULT NULL,
   `tfr_processed` tinyint(4) NOT NULL DEFAULT 0,
-  `notam_year` smallint(6) GENERATED ALWAYS AS (year(`date_added`) + (cast(substring_index(`notam`,'/',1) as signed) - year(`date_added`) MOD 10 + 15) MOD 10 - 5) STORED COMMENT 'NOTAM issue year: the year ending in the NOTAM year digit closest to date_added (IDs repeat every 10 years)',
   PRIMARY KEY (`tfr_id`),
-  UNIQUE KEY `uniq_notam_year` (`notam`,`notam_year`)
+  UNIQUE KEY `uniq_notam_start` (`notam`,`tfr_start_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `tfr_locations`;

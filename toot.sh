@@ -21,7 +21,8 @@ if [[ -n "$IMG_PATH" ]]; then
     MEDIA_JSON=$(echo "$MEDIA_RESPONSE" | sed '$d')
     MEDIA_STATUS=$(echo "$MEDIA_RESPONSE" | tail -n1)
 
-    if [[ "$MEDIA_STATUS" -ne 200 ]]; then
+    # 200 = processed, 202 = accepted but still processing in the background
+    if [[ "$MEDIA_STATUS" != "200" && "$MEDIA_STATUS" != "202" ]]; then
         echo "Media upload failed with status $MEDIA_STATUS"
         echo "Response: $MEDIA_JSON"
         exit 1
@@ -29,7 +30,23 @@ if [[ -n "$IMG_PATH" ]]; then
 
     # Extract media ID from the JSON response
     MEDIA_ID=$(echo "$MEDIA_JSON" | jq -r '.id')
-    echo "Media uploaded successfully. Media ID: $MEDIA_ID"
+    echo "Media uploaded (status $MEDIA_STATUS). Media ID: $MEDIA_ID"
+
+    # A status that attaches unprocessed media is rejected, so wait (up to ~60s) until the media has a URL
+    if [[ "$MEDIA_STATUS" == "202" ]]; then
+        for i in $(seq 1 30); do
+            sleep 2
+            CHECK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$INSTANCE_URL/api/v1/media/$MEDIA_ID" \
+                -H "Authorization: Bearer $ACCESS_TOKEN")
+            if [[ "$CHECK_STATUS" == "200" ]]; then
+                echo "Media finished processing after $((i * 2))s"
+                break
+            fi
+        done
+        if [[ "$CHECK_STATUS" != "200" ]]; then
+            echo "Media still processing after 60s (last status $CHECK_STATUS); trying to post anyway"
+        fi
+    fi
 fi
 
 # Step 2: Post the status
@@ -54,7 +71,7 @@ TOOT_JSON=$(echo "$TOOT_RESPONSE" | sed '$d')
 TOOT_STATUS=$(echo "$TOOT_RESPONSE" | tail -n1)
 
 # Check if the status post was successful
-if [[ "$TOOT_STATUS" -ne 200 ]]; then
+if [[ "$TOOT_STATUS" != "200" ]]; then
     echo "Status post failed with status $TOOT_STATUS"
     echo "Response: $TOOT_JSON"
     exit 1

@@ -173,7 +173,13 @@ imagettftext($im, 12, 0, 72, 712, $black, $font, $notes);
 imagepng($im, $png_save_path."$tfr_id.png");
 
 //Overlay template over the map
-$tfr_map_image	= imagecreatefrompng(__DIR__."/maps/$tfr_id.png");
+//The map can be missing if the Google download failed (tfrmonitor.php alerts about that). Render the card
+//without it rather than crashing, so the posts still go out.
+$tfr_map_image	= @imagecreatefrompng(__DIR__."/maps/$tfr_id.png");
+if(!$tfr_map_image)
+{
+	echo "WARNING: no usable map at maps/$tfr_id.png; rendering without it\n";
+}
 $template_image	= imagecreatefrompng($template_path);
 $logo_twitter	= imagecreatefrompng($logo_twitter);
 $logo_facebook	= imagecreatefrompng($logo_facebook);
@@ -190,7 +196,10 @@ imagealphablending	($final_image,true);
 echo "Template path: $template_path\n";
 
 //imagecopy		($tfr_map_image, $legend, 0,0,0,0,600,600);
-imagecopy		($final_image, $tfr_map_image, 329, 85, 0, 0, 600,600);
+if($tfr_map_image)
+{
+	imagecopy	($final_image, $tfr_map_image, 329, 85, 0, 0, 600,600);
+}
 imagecopy		($final_image, $template_image, 0, 0, 0, 0, $image_width, $image_height);
 imagecopy		($final_image, $im, 0, 0, 0, 0, $image_width, $image_height);
 

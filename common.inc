@@ -118,6 +118,22 @@ function tfr_local_time($ts)
     return $d->format('M j g:ia T');
 }
 
+function tfr_notam_recorded($conn, $notam_id)
+{
+    // Has this TFR already been posted? FAA NOTAM numbers are NOT unique: the same "6/7129" can be a Cape TFR
+    // in June and a Starbase TFR in November. A TFR in the FAA list is current or upcoming, so it is only the
+    // same TFR as a stored row whose window hasn't long ended (7 days of slack, all times UTC).
+    $stmt = $conn->prepare("SELECT COUNT(*) FROM tfr_list WHERE notam = ?
+        AND (tfr_end_time > UTC_TIMESTAMP() - INTERVAL 7 DAY
+             OR (tfr_end_time IS NULL AND date_added > NOW() - INTERVAL 180 DAY))");
+    $stmt->bind_param("s", $notam_id);
+    $stmt->execute();
+    $stmt->bind_result($count);
+    $stmt->fetch();
+    $stmt->close();
+    return $count > 0;
+}
+
 function get_new_tfrs($conn)
 {
     $target_url = "https://tfr.faa.gov/tfrapi/getTfrList";
@@ -163,15 +179,17 @@ function get_new_tfrs($conn)
         return null;
     }
 
-    file_put_contents(__DIR__ . '/tfrs.json', $json);
-
     $tfr_array = json_decode($json, true);
-    
-    // Handle cases where JSON might be malformed or empty
+
+    // Handle cases where JSON might be malformed or empty. This counts as a failed fetch (and is alerted
+    // like one), and tfrs.json is only written after this check, because its age is how
+    // tfr_fetch_failed() knows when the feed last worked.
     if (!is_array($tfr_array)) {
-        echo "Error decoding JSON. Response length: " . strlen($json) . "\n";
+        tfr_fetch_failed("FAA TFR list was not valid JSON (" . strlen($json) . " bytes: " . substr(trim(strip_tags($json)), 0, 100) . ")");
         return null;
     }
+
+    file_put_contents(__DIR__ . '/tfrs.json', $json);
 
     $return_list = [];
 
@@ -187,16 +205,8 @@ function get_new_tfrs($conn)
         }
 
         // Prepared statement to prevent SQL injection
-        // NOTAM IDs repeat every 10 years ("6/7130" = 2016, 2026, 2036...), so only look back 5 years
-        $stmt = $conn->prepare("SELECT COUNT(*) AS cnt FROM tfr_list WHERE notam = ? AND date_added > NOW() - INTERVAL 5 YEAR");
-        $stmt->bind_param("s", $notam_id);
-        $stmt->execute();
-        $stmt->bind_result($count);
-        $stmt->fetch();
-        $stmt->close();
-
-        // If NOTAM is not in the database, add it to return list
-        if ($count == 0) 
+        // If NOTAM is not in the database (as a TFR that is still current), add it to return list
+        if (!tfr_notam_recorded($conn, $notam_id)) 
         {
             echo "$notam_id is new\n";
             $return_list[] = $notam;
@@ -435,9 +445,10 @@ function rll_tweet_suffix($tweet, $launch, $limit = 300)
 	{
 		return '';
 	}
+	//The URL must not be wrapped in parentheses: Bluesky's link detection swallows the closing ")" and the link breaks
 	$options	= array(
-		"\nPossibly: ".rll_launch_label($launch)." ({$launch['url']})",
-		"\nPossibly: ".rll_launch_label($launch, false)." ({$launch['url']})",
+		"\nPossibly: ".rll_launch_label($launch)." - {$launch['url']}",
+		"\nPossibly: ".rll_launch_label($launch, false)." - {$launch['url']}",
 		"\nPossibly: ".rll_launch_label($launch),
 		"\nPossibly: ".rll_launch_label($launch, false),
 	);
@@ -455,7 +466,7 @@ function rll_match($conn, $start_time, $location, $end_time = null)
 {
 	//Kept for older callers: returns "\nPossibly: ..." or false. $location is the TFR city.
 	$launch	= rll_find_launch($conn, $location, $start_time, $end_time);
-	return $launch ? "\nPossibly: ".rll_launch_label($launch)." ({$launch['url']})" : false;
+	return $launch ? "\nPossibly: ".rll_launch_label($launch)." - {$launch['url']}" : false;
 }
 
 function gpt_query($working_text)
