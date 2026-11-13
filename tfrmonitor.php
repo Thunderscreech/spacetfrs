@@ -62,6 +62,17 @@ if($dry_run && count($argv) > 1)
 if($dry_run)
 {
 	echo "*** DRY RUN: nothing will be saved, rendered, or posted ***\n";
+} else
+{
+	//Cron overwrites tfrmonitor_check.log every 3 minutes, which loses the output of the runs that
+	//actually posted something. Keep a copy of those runs (only those) in tfrmonitor_posts.log.
+	$posts_log	= __DIR__.'/tfrmonitor_posts.log';
+	file_put_contents($posts_log, "\n=== ".date('Y-m-d H:i:s T')." ".count($tfr_list)." new TFR(s) ===\n", FILE_APPEND);
+	ob_start(function($buffer) use ($posts_log)
+	{
+		file_put_contents($posts_log, $buffer, FILE_APPEND);
+		return $buffer; //Still goes to stdout (tfrmonitor_check.log) too
+	}, 1);
 }
 
 //Each TFR is processed on its own. A failure on one (bad XML, a DB error, an odd character in a name)
@@ -129,15 +140,8 @@ function tfr_alert_once($key, $msg, $every = 21600)
 
 function tfr_already_recorded($conn, $notam_id)
 {
-	//NOTAM IDs are "<last digit of year>/<sequence>", so the same ID comes back every 10 years.
-	//Only count rows from the last 5 years as "already posted".
-	$stmt	= $conn->prepare("SELECT COUNT(*) FROM tfr_list WHERE notam = ? AND date_added > NOW() - INTERVAL 5 YEAR");
-	$stmt->bind_param("s", $notam_id);
-	$stmt->execute();
-	$stmt->bind_result($count);
-	$stmt->fetch();
-	$stmt->close();
-	return $count > 0;
+	//See tfr_notam_recorded() in common.inc: NOTAM numbers get reused, so this compares against current TFRs only
+	return tfr_notam_recorded($conn, $notam_id);
 }
 
 function tfr_location_row($conn, $city)
@@ -235,8 +239,19 @@ function xml_tfr($notam_id)
 	$notam		= $notam_id;
 	$start_time	= xml_get_start_time($xml);
 	$end_time	= xml_get_end_time($xml);
-	$human_start	= date_format(date_create("$start_time"),"l, F jS, Y \a\\t H:i")." UTC";
-	$human_end	= date_format(date_create("$end_time"),"l, F jS, Y \a\\t H:i")." UTC";
+	//A missing start time would otherwise turn into "now" and be posted as fact: fail this TFR instead
+	//(it is alerted and retried). A missing end time is posted as "further notice".
+	if(rll_utc_ts($start_time) === null)
+	{
+		throw new RuntimeException("TFR XML has no usable start time (dateEffective='$start_time')");
+	}
+	if(rll_utc_ts($end_time) === null)
+	{
+		echo "WARNING: TFR XML has no usable end time (dateExpire='$end_time'); posting it as 'further notice'\n";
+		$end_time	= null;
+	}
+	$human_start	= tfr_human_time($start_time);
+	$human_end	= $end_time === null ? "further notice" : tfr_human_time($end_time);
 	$raw_airspace	= xml_get_raw_airspace($xml);
 	$city		= xml_get_city($xml);
 	$location_title	= xml_tfr_location_title($conn, $xml);
@@ -279,7 +294,7 @@ function xml_tfr($notam_id)
 	$map_string	= (string)$map_string;
 	$stmt		= $conn->prepare("INSERT INTO tfr_list (tfr_unique, notam, tfr_url, tfr_map_image, tfr_type, tfr_start_time, tfr_end_time, tfr_detail, raw_airspace, formatted_airspace, map_string, altitude, date_added, last_seen, deleted_early, tweet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, NOW(), NOW(), 0, ?)");
 	//A dry run may replay an already-posted NOTAM; give its (rolled back) row a different notam so the
-	//unique key on (notam, notam_year) doesn't reject it
+	//unique key on (notam, tfr_start_time) doesn't reject it
 	$db_notam	= $dry_run ? "$notam-dry" : $notam;
 	$stmt->bind_param("ssssssssssss", $uniquekey, $db_notam, $tfr_url, $tfr_map_image, $tfr_type, $start_time, $end_time, $tfr_detail, $raw_airspace, $map_string, $altitude, $tweet);
 	$stmt->execute();
@@ -299,26 +314,39 @@ function xml_tfr($notam_id)
 		$map_url	= $map_url."&zoom=8";
 	}
 
-	if(isset($save_path))
+	//Download the Google map. Only keep it if it really is a PNG: a failed request used to leave an empty
+	//file behind, so the "map failure" alert below never fired.
+	$map_error	= null;
+	if($map_url === false)
+	{
+		$map_error	= "no airspace coordinates in the TFR XML";
+	} else
 	{
 		//Timeout so a stalled Google request can't hold the run lock indefinitely
-		$map	= file_get_contents($map_url, false, stream_context_create(array('http' => array('timeout' => 30))));
-		file_put_contents($save_path, $map);
+		$map	= @file_get_contents($map_url, false, stream_context_create(array('http' => array('timeout' => 30, 'ignore_errors' => true))));
+		$status	= $http_response_header[0] ?? 'no response';
+		if($map !== false && strncmp($map, "\x89PNG\r\n\x1a\n", 8) === 0)
+		{
+			file_put_contents($save_path, $map);
+		} else
+		{
+			$map_error	= "$status, ".strlen((string)$map)." bytes: ".substr(trim(strip_tags((string)$map)), 0, 150);
+		}
 	}
 
 	if($dry_run)
 	{
-		echo "DRY RUN: map saved to $save_path (".filesize($save_path)." bytes). Would now render, post to Facebook, Mastodon and Bluesky, and alert Discord with:\n$tweet\n";
+		echo "DRY RUN: ".($map_error ? "map FAILED ($map_error)" : "map saved to $save_path (".filesize($save_path)." bytes)").". Would now render, post to Facebook, Mastodon and Bluesky, and alert Discord with:\n$tweet\n";
 		echo "DRY RUN: Mastodon command would be: ".tfr_toot_command($tweet)."\n";
 		$conn->rollback();
 		echo "DRY RUN: DB insert rolled back\n";
 		return;
 	}
 
-	if(!file_exists($save_path))
+	if($map_error !== null)
 	{
-		dy_discord("Google map failure");
-		//Todo Copy the backup map into its place
+		//Posting continues: render_tfr_image.php draws the card without the map
+		dy_discord("Google map failure for TFR $notam (tfr_id $tfr_id): $map_error. Posting without the map.");
 		$error_state	= true;
 	}
 
@@ -370,8 +398,11 @@ function xml_tfr($notam_id)
 	file_put_contents("/home/chairboy/tfrmonitor/skeet.txt", $tweet); //We will post the text file instead
 
 	echo "Posting to Bluesky...\n";
-	$bluesky_command	= "cd /home/chairboy/tfrmonitor/; /home/chairboy/tfrmonitor/skeet.sh > /home/chairboy/tfrmonitor/bluesky_post.log 2>&1";
-	exec($bluesky_command);
+	//Append like the Facebook and Mastodon logs, so every attempt is kept
+	file_put_contents("/home/chairboy/tfrmonitor/bluesky_post.log", "=== ".date('Y-m-d H:i:s T')." tfr_id $tfr_id ===\n", FILE_APPEND);
+	$bluesky_command	= "cd /home/chairboy/tfrmonitor/; /home/chairboy/tfrmonitor/skeet.sh >> /home/chairboy/tfrmonitor/bluesky_post.log 2>&1";
+	exec($bluesky_command, $bsky_out, $bsky_rc);
+	file_put_contents("/home/chairboy/tfrmonitor/bluesky_post.log", "--- exit code: $bsky_rc\n\n", FILE_APPEND);
 
 	//Bsky
 
@@ -397,7 +428,14 @@ function xml_tfr($notam_id)
 function tfr_toot_command($tweet)
 {
 	//escapeshellarg: post text can contain apostrophes, quotes, or $ (it comes from FAA and launch-name data)
-	return "/home/chairboy/tfrmonitor/toot.sh ".escapeshellarg($tweet)." /home/chairboy/tfrmonitor/rendered_maps/temp_file.png";
+	//temp_mastodon_file.png carries the Mastodon logo (temp_file.png is the Twitter-branded one)
+	return "/home/chairboy/tfrmonitor/toot.sh ".escapeshellarg($tweet)." /home/chairboy/tfrmonitor/rendered_maps/temp_mastodon_file.png";
+}
+
+function tfr_human_time($utc)
+{
+	//"2026-11-14T22:30:00" -> "Saturday, November 14th, 2026 at 22:30 UTC"
+	return date_format(date_create("$utc"), "l, F jS, Y \a\\t H:i")." UTC";
 }
 
 function xml_capsule_secondary($xml)
@@ -515,9 +553,16 @@ function xml_get_altitude($xml)
 function xml_get_floor_alt($xml)
 {
 	preg_match_all('/<valDistVerLower>(.*?)<\/valDistVerLower>/', $xml, $output_array);
-	$alt	= $output_array[1][0]; //Get raw number
+	$alt	= trim((string)($output_array[1][0] ?? '')); //Get raw number
 	preg_match_all('/<uomDistVerLower>(.*?)<\/uomDistVerLower>/', $xml, $output_array);
-	$uom	= $output_array[1][0]; //Get unit of measurement
+	$uom	= trim((string)($output_array[1][0] ?? '')); //Get unit of measurement
+
+	//Not a number (missing, "SFC", "GND"...): number_format() would throw and stop the whole TFR
+	if(!is_numeric($alt))
+	{
+		return ($alt === '' || in_array(strtoupper($alt), array('SFC', 'GND', 'SURFACE'))) ? "the surface" : $alt;
+	}
+	$alt	= (float)$alt;
 
 	if($uom == "FL")
 	{
@@ -539,15 +584,28 @@ function xml_get_floor_alt($xml)
 function xml_get_ceiling_alt($xml)
 {
 	preg_match_all('/<valDistVerUpper>(.*?)<\/valDistVerUpper>/', $xml, $output_array);
-	$alt	= $output_array[1][0]; //Get raw number
+	$alt	= trim((string)($output_array[1][0] ?? '')); //Get raw number
 	preg_match_all('/<uomDistVerUpper>(.*?)<\/uomDistVerUpper>/', $xml, $output_array);
-	$uom	= $output_array[1][0]; //Get unit of measurement
+	$uom	= trim((string)($output_array[1][0] ?? '')); //Get unit of measurement
+
+	//Not a number: unlimited counts as space; anything else is passed through rather than throwing
+	if(!is_numeric($alt))
+	{
+		if(in_array(strtoupper($alt), array('UNL', 'UNLTD', 'UNLIMITED')))
+		{
+			return "space";
+		}
+		return $alt === '' ? "an unspecified altitude" : "and including $alt";
+	}
+	$alt	= (float)$alt;
 
 	if($uom == "FL")
 	{
 		$alt	= $alt * 100;
 	}
 
+	//"Space" is deliberate for FL180: at and above 18,000ft (Class A) all flight is under ATC control, so a
+	//TFR from the surface to FL180 closes everything a TFR can close. 91000 and 99900 are unlimited.
 	if($alt == 18000 || $alt == 91000 || $alt == 99900)
 	{
 		$alt	= "space";

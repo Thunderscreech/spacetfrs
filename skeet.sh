@@ -29,7 +29,7 @@ echo "Checking image readability:"
 test -r /home/chairboy/tfrmonitor/rendered_maps/temp_bluesky_file.png && echo "Readable" || echo "Not readable"
 
 CRON=true  bsky post --text-file /home/chairboy/tfrmonitor/skeet.txt --image /home/chairboy/tfrmonitor/rendered_maps/temp_bluesky_file.png
-cat $HOME/.bsky_sh_cli/debug/core_post
+# (bsky post prints the new post above; the old debug file it used to cat here was stale and misleading)
 
 echo "Logging out"
 bsky logout
