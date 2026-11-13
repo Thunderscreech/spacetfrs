@@ -50,3 +50,6 @@ fonts/
 # --- Dependencies (run `php composer.phar install`) ---
 vendor/
 composer.phar
+
+# rocketlaunchlivescraper.php alert throttle
+rll_last_alert.txt
