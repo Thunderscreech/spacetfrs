@@ -51,7 +51,7 @@ CREATE TABLE `launch_sites` (
   `site_id` int(11) NOT NULL AUTO_INCREMENT,
   `faa_name` varchar(64) NOT NULL,
   `pretty_name` varchar(128) NOT NULL,
-  `launch_location_slug` varchar(64) NOT NULL,
+  `launch_location_slug` varchar(128) NOT NULL,
   PRIMARY KEY (`site_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -126,13 +126,20 @@ DROP TABLE IF EXISTS `upcoming_launches`;
 /*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE `upcoming_launches` (
   `launch_id` int(11) NOT NULL,
-  `launch_name` varchar(64) DEFAULT NULL,
-  `launch_provider` varchar(64) DEFAULT NULL,
-  `launch_vehicle` varchar(64) DEFAULT NULL,
-  `launch_location_slug` varchar(64) DEFAULT NULL,
+  `launch_name` varchar(128) DEFAULT NULL,
+  `launch_provider` varchar(128) DEFAULT NULL,
+  `launch_vehicle` varchar(128) DEFAULT NULL,
+  `launch_location_slug` varchar(128) DEFAULT NULL,
   `launch_est_date` varchar(32) DEFAULT NULL,
-  `launch_slug` varchar(32) DEFAULT NULL,
-  PRIMARY KEY (`launch_id`)
+  `launch_slug` varchar(128) DEFAULT NULL,
+  `launch_t0` datetime DEFAULT NULL COMMENT 'UTC target launch time',
+  `launch_win_open` datetime DEFAULT NULL COMMENT 'UTC window open',
+  `launch_win_close` datetime DEFAULT NULL COMMENT 'UTC window close',
+  `launch_date_precision` varchar(8) DEFAULT NULL COMMENT 'time, day, month, quarter, year or none',
+  `launch_modified` datetime DEFAULT NULL COMMENT 'UTC, rocketlaunch.live last modified',
+  `last_seen` datetime DEFAULT NULL COMMENT 'Server time this launch was last in the feed',
+  PRIMARY KEY (`launch_id`),
+  KEY `idx_location_t0` (`launch_location_slug`,`launch_t0`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `us_states`;

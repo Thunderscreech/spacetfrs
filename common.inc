@@ -286,37 +286,176 @@ function mastodon_post($post_text, $img)
 	return $response['id'];
 }
 
-function rll_match($conn, $start_time, $location)
+// ---------------------------------------------------------------------------------------------
+// Rocketlaunch.live matching: which launch is this TFR probably for?
+//
+// 1. Site: the TFR's city (from the FAA XML, e.g. "CAPE CANAVERAL", "STARBASE", "VANDENBERG SFB") must contain
+//    a launch_sites.faa_name keyword; that row gives the rocketlaunch.live location slug(s) for the site.
+// 2. Time: launches with an exact time (t0 or window) are scored by how well they fit the TFR window, so the
+//    right one wins when a site has several launches the same day. Launches only known to the day score lower.
+// 3. The best candidate is returned only if it scores at least RLL_MIN_SCORE.
+// ---------------------------------------------------------------------------------------------
+const RLL_MIN_SCORE	= 50;
+
+function rll_utc_ts($value)
 {
-	//Attempt to cross reference a launch with one from Rocketlaunch.live
+	//UTC timestamp from "2026-11-14T22:30:00" (FAA XML) or "2026-11-14 22:30:00" (DB), or null
+	if(empty($value))
+	{
+		return null;
+	}
+	try
+	{
+		return (new DateTime((string)$value, new DateTimeZone('UTC')))->getTimestamp();
+	} catch(Exception $e)
+	{
+		return null;
+	}
+}
 
-	//Attempt to guess a launch location
-//	$sqlstring	= "SELECT * FROM tfrmonitor.upcoming_launches, launch_sites WHERE DATE(convert_tz(STR_TO_DATE('$tfr_from', 'From %M %d, %Y at %H%i UTC'), '+00:00',@@global.time_zone)) = launch_est_date AND '$location' LIKE CONCAT('%', launch_sites.faa_name, '%') AND launch_sites.launch_location_slug = tfrmonitor.upcoming_launches.launch_location_slug";
-	$stmt		= $conn->prepare("SELECT * FROM upcoming_launches, launch_sites WHERE DATE(convert_tz(?, '+00:00',@@global.time_zone)) = launch_est_date AND ? LIKE CONCAT('%', launch_sites.faa_name, '%') AND launch_sites.launch_location_slug = upcoming_launches.launch_location_slug");
-	$stmt->bind_param("ss", $start_time, $location);
+function rll_find_launch($conn, $city, $tfr_start, $tfr_end = null, $require_fresh = true)
+{
+	//$require_fresh: ignore launches the scraper hasn't seen in the feed for 3 days (scrubbed or removed).
+	//Pass false only when matching historical TFRs.
+	$city	= strtoupper(trim((string)$city));
+	$start	= rll_utc_ts($tfr_start);
+	$end	= rll_utc_ts($tfr_end) ?? $start;
+	if($city === '' || $start === null)
+	{
+		return null;
+	}
+	if($end < $start)
+	{
+		list($start, $end) = array($end, $start);
+	}
+
+	$from_ts	= gmdate('Y-m-d H:i:s', $start - 86400);
+	$to_ts		= gmdate('Y-m-d H:i:s', $end + 86400);
+	$from_day	= gmdate('Y-m-d', $start - 86400);
+	$to_day		= gmdate('Y-m-d', $end + 86400);
+	$fresh		= $require_fresh ? "AND u.last_seen > NOW() - INTERVAL 3 DAY" : "";
+
+	$stmt	= $conn->prepare("SELECT DISTINCT u.* FROM upcoming_launches u
+		JOIN launch_sites s ON s.launch_location_slug = u.launch_location_slug
+		WHERE ? LIKE CONCAT('%', UPPER(s.faa_name), '%')
+		AND ( (u.launch_date_precision = 'time' AND COALESCE(u.launch_t0, u.launch_win_open) BETWEEN ? AND ?)
+		   OR (u.launch_date_precision = 'day' AND u.launch_est_date BETWEEN ? AND ?) )
+		$fresh");
+	$stmt->bind_param("sssss", $city, $from_ts, $to_ts, $from_day, $to_day);
 	$stmt->execute();
-	$result		= $stmt->get_result();
-	echo "RLL match lookup: $start_time / $location\n";
-	while ($row	= mysqli_fetch_assoc($result))
+	$result	= $stmt->get_result();
+
+	$best	= null;
+	$mid	= ($start + $end) / 2;
+	while($row = $result->fetch_assoc())
 	{
-		$launch_name	= $row['launch_name'];
-		$launch_provider= $row['launch_provider'];
-		$launch_slug	= $row['launch_slug'];
+		list($score, $why) = rll_score_launch($row, $start, $end);
+		$anchor		= rll_utc_ts($row['launch_t0'] ?? $row['launch_win_open']) ?? rll_utc_ts($row['launch_est_date'].' 12:00:00');
+		$distance	= abs($anchor - $mid);
+		echo "RLL candidate: {$row['launch_name']} ({$row['launch_vehicle']}, {$row['launch_location_slug']}) score $score: $why\n";
 
-		$rll_url	= "https://www.rocketlaunch.live/launch/$launch_slug";
-
-
+		if($best === null || $score > $best['score'] || ($score == $best['score'] && $distance < $best['distance']))
+		{
+			$best	= array(
+				'launch_id'	=> $row['launch_id'],
+				'name'		=> $row['launch_name'],
+				'provider'	=> $row['launch_provider'],
+				'vehicle'	=> $row['launch_vehicle'],
+				'slug'		=> $row['launch_slug'],
+				'url'		=> "https://www.rocketlaunch.live/launch/".$row['launch_slug'],
+				'score'		=> $score,
+				'why'		=> $why,
+				'distance'	=> $distance,
+			);
+		}
 	}
-	//echo "RLL: $rll_url\n";
+	$stmt->close();
 
-	if(isset($launch_name) && isset($rll_url))
+	if($best === null || $best['score'] < RLL_MIN_SCORE)
 	{
-		//return array($launch_name, $rll_url);
-		return "\nPossibly $launch_name ($rll_url)";
-	} else
-	{
-		return false;
+		echo "RLL: no confident launch match for $city ".gmdate('Y-m-d H:i', $start)."-".gmdate('H:i', $end)." UTC\n";
+		return null;
 	}
+	echo "RLL match: {$best['name']} (score {$best['score']}: {$best['why']})\n";
+	return $best;
+}
+
+function rll_score_launch($row, $start, $end)
+{
+	//Returns array(score 0-100, reason)
+	if($row['launch_date_precision'] == 'day')
+	{
+		$day_start	= rll_utc_ts($row['launch_est_date'].' 00:00:00');
+		if($day_start <= $end && $day_start + 86400 > $start)
+		{
+			return array(60, "launch date {$row['launch_est_date']} (no time yet) overlaps the TFR");
+		}
+		return array(30, "launch date {$row['launch_est_date']} (no time yet) is a day off the TFR");
+	}
+
+	$t0		= rll_utc_ts($row['launch_t0']);
+	$win_open	= rll_utc_ts($row['launch_win_open']) ?? $t0;
+	$win_close	= rll_utc_ts($row['launch_win_close']) ?? max($t0 ?? $win_open, $win_open);
+	$anchor		= $t0 ?? $win_open;
+
+	if($anchor >= $start && $anchor <= $end)
+	{
+		return array(100, "launch time ".gmdate('Y-m-d H:i', $anchor)." UTC is inside the TFR");
+	}
+	if($win_open <= $end && $win_close >= $start)
+	{
+		return array(90, "launch window ".gmdate('H:i', $win_open)."-".gmdate('H:i', $win_close)." UTC overlaps the TFR");
+	}
+
+	//Outside the TFR: lose 10 points per hour away, so up to 3 hours off still counts (TFRs are sometimes
+	//published before the provider's time is final)
+	$gap_hours	= min(abs($anchor - $start), abs($anchor - $end)) / 3600;
+	return array(max(0, (int)round(80 - 10 * $gap_hours)), "launch time ".gmdate('Y-m-d H:i', $anchor)." UTC is ".round($gap_hours, 1)."h outside the TFR");
+}
+
+function rll_launch_label($launch, $with_vehicle = true)
+{
+	//"Starlink (10-12), Falcon 9"; an unnamed "TBD" launch becomes "SpaceX Falcon 9 launch"
+	$name	= trim($launch['name']);
+	if($name === '' || strtoupper($name) === 'TBD')
+	{
+		return trim("{$launch['provider']} {$launch['vehicle']}")." launch";
+	}
+	if($with_vehicle && $launch['vehicle'] !== '' && stripos($name, $launch['vehicle']) === false)
+	{
+		return "$name, {$launch['vehicle']}";
+	}
+	return $name;
+}
+
+function rll_tweet_suffix($tweet, $launch, $limit = 300)
+{
+	//The same text goes to Bluesky (300 characters max), so use the longest version that fits
+	if(!$launch)
+	{
+		return '';
+	}
+	$options	= array(
+		"\nPossibly: ".rll_launch_label($launch)." ({$launch['url']})",
+		"\nPossibly: ".rll_launch_label($launch, false)." ({$launch['url']})",
+		"\nPossibly: ".rll_launch_label($launch),
+		"\nPossibly: ".rll_launch_label($launch, false),
+	);
+	foreach($options as $suffix)
+	{
+		if(mb_strlen($tweet.$suffix) <= $limit)
+		{
+			return $suffix;
+		}
+	}
+	return '';
+}
+
+function rll_match($conn, $start_time, $location, $end_time = null)
+{
+	//Kept for older callers: returns "\nPossibly: ..." or false. $location is the TFR city.
+	$launch	= rll_find_launch($conn, $location, $start_time, $end_time);
+	return $launch ? "\nPossibly: ".rll_launch_label($launch)." ({$launch['url']})" : false;
 }
 
 function gpt_query($working_text)
@@ -931,41 +1070,15 @@ function pushbullet($msg)
 
 function attempt_to_match_launch($conn, $tfr_from, $tfr_to, $location)
 {
-	//Attempt to cross reference a launch with one from Rocketlaunch.live
-
-//	echo "Debug: TO FROM is $tfr_to $tfr_from Location is $location\n";
-
-
-	//Attempt to guess a launch location
-//	$sqlstring	= "SELECT launch_location_slug FROM launch_sites WHERE '$location' LIKE CONCAT('%', faa_name, '%')";
-	
-
-	//Assuming From January 30, 2021 at 1139 UTC
-	//convert_tz(STR_TO_DATE('$tfr_from', 'From %M %d, %Y at %H%i UTC'), '+00:00',@@global.time_zone)
-
-//	$sqlstring	= "SELECT * FROM upcoming_launches WHERE DATE(convert_tz(STR_TO_DATE('$tfr_from', 'From %M %d, %Y at %H%i UTC'), '+00:00',@@global.time_zone)) = launch_est_date";
-	$sqlstring	= "SELECT * FROM upcoming_launches, launch_sites WHERE DATE(convert_tz(STR_TO_DATE('$tfr_from', 'From %M %d, %Y at %H%i UTC'), '+00:00',@@global.time_zone)) = launch_est_date AND '$location' LIKE CONCAT('%', launch_sites.faa_name, '%') AND launch_sites.launch_location_slug = upcoming_launches.launch_location_slug";
-	echo "$sqlstring\n";
-	$result		= mysqli_query($conn, $sqlstring);
-	while ($row	= mysqli_fetch_assoc($result))
-	{
-		$launch_name	= $row['launch_name'];
-		$launch_provider= $row['launch_provider'];
-		$launch_slug	= $row['launch_slug'];
-
-		$rll_url	= "https://www.rocketlaunch.live/launch/$launch_slug";
-
-
-	}
-	//echo "RLL: $rll_url\n";
-
-	if(isset($launch_name) && isset($rll_url))
-	{
-		return array($launch_name, $rll_url);
-	} else
+	//Used by render_tfr_image.php. $tfr_from/$tfr_to are UTC datetimes from tfr_list; $location is tfr_detail
+	//("CAPE CANAVERAL, FL, Friday, ..."), whose first part is the TFR city.
+	$city	= trim(explode(',', (string)$location)[0]);
+	$launch	= rll_find_launch($conn, $city, $tfr_from, $tfr_to);
+	if(!$launch)
 	{
 		return false;
 	}
+	return array(rll_launch_label($launch), $launch['url']);
 }
 
 function location_data($conn, $tfr_detail, $altitude)

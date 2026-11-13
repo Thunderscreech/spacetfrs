@@ -245,7 +245,7 @@ function xml_tfr($notam_id)
 	$altitude		= xml_get_altitude($xml);
 	$tfr_type		= "SPACE OPERATIONS"; //Hard coded for now 
 	$map_string	= xml_build_map_string($conn, $xml);
-	$rll_match	= rll_match($conn, $start_time, $faa_title);
+	$rll_launch	= rll_find_launch($conn, $city, $start_time, $end_time); //Which rocketlaunch.live launch is this TFR probably for?
 	$uniquekey	= xml_uniquekey($xml);
 	$aux_capsule	= xml_capsule_secondary($xml); //Check for some text in the NOTAM related to spacecraft recovery that sometimes appears
 
@@ -261,7 +261,8 @@ function xml_tfr($notam_id)
 	//From January 03, 2023 at 1426 UTC to To January 03, 2023 at 1520 UTC
 	//Altitude: From the surface up to and including 18,000ft
 	//https://tfr.faa.gov/save_pages/detail_3_0121.html
-	$tweet	= "$location_title temporary restriction:\nFrom $human_start to $human_end\n$altitude\n$tfr_url $rll_match";
+	$tweet	= "$location_title temporary restriction:\nFrom $human_start to $human_end\n$altitude\n$tfr_url";
+	$tweet	.= rll_tweet_suffix($tweet, $rll_launch); //Fits the launch in without going over Bluesky's 300 characters
 	echo "Constructed tweet:\n$tweet\n";
 
 	//Final validation, if we have everything, insert it into the database.  If no, then send an error message to Discord
@@ -277,7 +278,10 @@ function xml_tfr($notam_id)
 	$raw_airspace	= (string)$raw_airspace;
 	$map_string	= (string)$map_string;
 	$stmt		= $conn->prepare("INSERT INTO tfr_list (tfr_unique, notam, tfr_url, tfr_map_image, tfr_type, tfr_start_time, tfr_end_time, tfr_detail, raw_airspace, formatted_airspace, map_string, altitude, date_added, last_seen, deleted_early, tweet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, NOW(), NOW(), 0, ?)");
-	$stmt->bind_param("ssssssssssss", $uniquekey, $notam, $tfr_url, $tfr_map_image, $tfr_type, $start_time, $end_time, $tfr_detail, $raw_airspace, $map_string, $altitude, $tweet);
+	//A dry run may replay an already-posted NOTAM; give its (rolled back) row a different notam so the
+	//unique key on (notam, notam_year) doesn't reject it
+	$db_notam	= $dry_run ? "$notam-dry" : $notam;
+	$stmt->bind_param("ssssssssssss", $uniquekey, $db_notam, $tfr_url, $tfr_map_image, $tfr_type, $start_time, $end_time, $tfr_detail, $raw_airspace, $map_string, $altitude, $tweet);
 	$stmt->execute();
 
 	//Use the ID of the row we just inserted (not "newest row in the table", which can belong to another run)
